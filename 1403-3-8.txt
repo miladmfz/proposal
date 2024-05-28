@@ -1,0 +1,221 @@
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+-- Edited By eabdollahpur 1401/6/8, 10/26, 1402/7/16, 1403/3/8
+ALTER Procedure [dbo].[spApp_ocrFactorList]
+ @State Int =0,
+ @SearchTarget nvarchar(1000)='',
+ @WhereCluase nvarchar(4000)='',
+ @RowCount Int=10000,
+ @PageNo Int=0,
+ @OrderBy nvarchar(1000)= ' Order by o.AppTcPrintRef ',
+ @CountFlag bit =0,
+ @Db nvarchar(100) ='',
+ @SourceFlag Int=0
+As
+SET NOCOUNT ON
+Declare @sq nvarchar(max)='' , @days Int, @Ersali nvarchar(200)='', @Condition nvarchar(4000)='', @currentDB nvarchar(155)=db_name()
+
+Select @days = -1*dbo.fnDbSetupInt('AppOCR_FactorListDaysBefore', 10)
+declare @d varchar(10)= dbo.fnDate_ConvertToShamsi(DATEADD(d, @days, GetDate()))
+IF Ltrim(IsNull(@Db, ''))='' Set @Db=''
+Else IF db_id(@DB) Is Null Select @Db=''
+
+Select @Ersali= Case When IsNull(columnproperty(object_id('vwFactor'), 'Ersall', 'ColumnId'),0)>0 Then 'IsNull(f.Ersall, '''')' Else ' ''** Not ERSALL COLUMN **'' ' End
+Select @Condition = Case When LTrim(IsNull(@SearchTarget, ''))<>'' Then ' And (( Left(FactorDate,4)='''+Left(@d,4)+''' And FactorPrivateCode Like ''%'+@SearchTarget+'%'') or FactorDate Like ''%'+@SearchTarget+'%'' or CustName Like ''%'+@SearchTarget+'%'') ' Else '' End
+ + ' And '+Case @State When 0 Then 'o.AppIsControled=0 And o.AppIsPacked=0 And o.AppIsDelivered=0 And o.HasSignature=0'  -- Scaned with no op
+                       When 1 Then 'o.AppIsControled=1 And o.AppIsPacked=0 And o.AppIsDelivered=0 And o.HasSignature=0'  -- Controled
+                       When 2 Then 'o.AppIsControled=1 And o.AppIsPacked=1 And o.AppIsDelivered=0 And o.HasSignature=0'  -- Packed
+                       When 3 Then 'o.AppIsControled=1 And o.AppIsPacked=1 And o.AppIsDelivered=1 And o.HasSignature=0'  -- Delivered
+                       When 4 Then 'FactorDate > '''+@d+''''
+                       When 5 Then 'o.AppIsControled=1 And o.AppIsPacked=1 And o.AppIsDelivered=1 And o.HasSignature=1'
+                       Else '1=1' End
+  
+Select @sq = ' o.AppOCRFactorCode, o.AppTcPrintRef, f.FactorCode, f.FactorPrivateCode, f.FactorDate, f.CustName, f.CustomerCode
+     , f.[Address], f.Phone, f.Explain, o.AppIsControled, o.AppIsPacked, o.AppIsDelivered, o.HasSignature, o.IsEdited
+     , HasShortage = Case When Exists(Select 1 From @db.dbo.AppOCRFactorRow r Where r.AppOCRFactorRef=o.AppOCRFactorCode And IsNull(r.ShortageAmount,0)>0) Then 1 Else 0 End
+     , CustomerPath = '+@Ersali+ ', StackClass= @db.dbo.fnFactor_StackClass(FactorCode)
+     , f.AppFactorState
+From @db.dbo.AppOCRFactor o Join @db.dbo.vwFactor f on f.FactorCode=o.AppFactorRef
+Where FactorDate > '''+@d+''' '+ @Condition +@WhereCluase 
+
+IF @CountFlag=0
+Begin
+  IF @Db=''
+    Select @sq = 'Select Top '+LTrim(str(@RowCount))+' * From (Select rwn = row_number() over('+@OrderBy+')
+       , N'''+@currentDB+''' dbname ,'+Replace(@sq, '@db.', '')+' ) o Where rwn>'+CAST(@PageNo*@RowCount as varchar(30))+' '+@OrderBy
+  Else
+    Select @sq = 'Select Top '+LTrim(str(@RowCount))+' * From(Select rwn = row_number() over('+@OrderBy+'), * From
+    (Select N'''+@currentDB+''' dbname,'+ Replace(@sq, '@db.', '')+' And '+CAST(@SourceFlag as varchar(5))+'<>2 
+     union All 
+     Select N'''+@Db+''' dbname,'+Replace(@sq, '@db.', '['+@Db+'].')+' And '+CAST(@SourceFlag as varchar(5))+'<>1 )o )o Where rwn>'+CAST(@PageNo*@RowCount as varchar(30))+' '+@OrderBy
+End
+Else
+Begin
+  IF @Db=''
+    Select @sq = 'Select Count(*) TotalRow From dbo.AppOCRFactor o Join dbo.vwFactor f on f.FactorCode=o.AppFactorRef Where FactorDate > '''+@d+''' '+ Replace(@Condition +@WhereCluase, '@db.', '')
+  Else
+    Select @sq = 'Select Sum(TotalRow) TotalRow From
+     (Select Count(*) TotalRow From dbo.AppOCRFactor o Join dbo.vwFactor f on f.FactorCode=o.AppFactorRef Where FactorDate > '''+@d+''' '+ Replace(@Condition +@WhereCluase, '@db.', '') 
+       +' And '+CAST(@SourceFlag as varchar(5))+'<>2 union All
+       Select Count(*) TotalRow From ['+@Db+'].dbo.AppOCRFactor o Join ['+@Db+'].dbo.vwFactor f on f.FactorCode=o.AppFactorRef 
+         Where FactorDate > '''+@d+''' '+ Replace(@Condition +@WhereCluase, '@db.', '['+@Db+'].') +' And '+CAST(@SourceFlag as varchar(5))+'<>1) o '
+End
+--Print @sq
+Exec(@sq)
+Go
+
+IF Not Exists(Select 1 From syscolumns Where id=object_id('FactorRowsLog') And name = 'RstMizRef')
+  Alter Table FactorRowsLog Add RstMizRef Int
+Go
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+-- Created by eabdollahpur 1397/02/22, 1402/1/8 Coffee, 1402/10/19, 1403/3/8
+ALTER Procedure [dbo].[spDbSetup_FactorRowsLog]
+  @Key varchar(255)
+ , @InsValue nvarchar(1000)
+ , @DelValue nvarchar(1000)
+As
+set nocount on
+IF (@Key <> 'FactorRowsLogActivate' ) or ( IsNull( @InsValue, '')  = IsNull( @DelValue , '') )
+  Return
+
+IF Object_ID( N'trgFactorRowLogUD') Is Not Null
+   Drop Trigger [trgFactorRowLogUD]
+
+Delete Reports Where ReportForm = 'FactorRowsLogRpt'
+
+Declare @st nvarchar(500)
+Select @InsValue = ltrim(rtrim(IsNull( @InsValue, '')))
+
+IF @InsValue = '1'
+    Select @st = 'f.isShopFactor = 0'
+Else IF @InsValue = '2'
+    Select @st = 'f.isShopFactor = 1'
+Else IF @InsValue = '3'
+    Select @st = 'f.isShopFactor in (0, 1)'
+Else IF @InsValue = '4'
+    Select @st = 'f.isShopFactor in (4, 5, 6)'
+Else IF @InsValue = '5'
+    Select @st = 'f.isShopFactor in (1, 4, 5, 6)'
+Else IF @InsValue = '6'
+    Select @st = 'f.isShopFactor in (0, 1, 4, 5, 6)'
+Else
+   Return 
+
+Set Identity_Insert Reports on
+Insert Into Reports ( ReportCode, L1, L2, L3, L4, L5, ReportTitle, ReportForm, SortField ) 
+ Select 190, 106, 0, 0, 0, 0, 'تاريخچه اقلام فاكتورهاي فروش', 'FactorRowsLogRpt', 'Z08                 '
+Set Identity_Insert Reports off
+
+Exec('Create Trigger [trgFactorRowLogUD] on dbo.FactorRows 
+For Update, Delete Not For Replication 
+As
+SET NOCOUNT ON
+IF Exists( Select Top 1 d.FactorRowCode From Deleted d Join Factor f on d.factorRef = f.FactorCode Where '+@st+')
+Begin
+  Declare @user Int, @Client Int
+  Select Top 1 @user = UserId, @Client = d.ClientRef From ClientConnected d Join Client c on d.ClientRef = c.ClientCode 
+  Where ( spid_k = @@spid or spid_r = @@spid) And ( d.LogoutTime Is Null) Order By ClientConnectedCode DESC
+
+  Insert Into FactorRowsLog ([FactorRowCode], [FactorRef], [StackRef], [GoodRef], [UnitRef], [Price], [BrokerPercent], [Explain], [GoodMaxSellPrice], [PeriodRef]
+      , [FacAmount], [FacUnit], [Ratio], [FacRatio], [Owner], [CreationDate], [Reformer], [ReformDate], [BrokerRef], [FactorTax], [FactorMayorTax], [rowguid], [IsDelivered]
+      , [DeliverDate], [DeliverTime], [SumTax], [SumMayorTax], [VoidAmount], [OwnerName], [ActDate], [ActType], [ActUserId], [ActClientRef], [ActSPID], [ActRegistered] 
+      , [FactorDate], [FactorPrivateCode], [CustomerRef], [isShopFactor], RstMizRef )
+   Select d.[FactorRowCode], d.[FactorRef], d.[StackRef], d.[GoodRef], d.[UnitRef], d.[Price], d.[BrokerPercent], d.[Explain], d.[GoodMaxSellPrice], d.[PeriodRef]
+      , d.[FacAmount], d.[FacUnit], d.[Ratio], d.[FacRatio], d.[Owner], d.[CreationDate], d.[Reformer], d.[ReformDate], d.[BrokerRef], d.[FactorTax], d.[FactorMayorTax]
+      , d.[rowguid], d.[IsDelivered], d.[DeliverDate], d.[DeliverTime], d.[SumTax], d.[SumMayorTax], d.[VoidAmount], d.[OwnerName]
+      , [ActDate] = GetDate()
+      , [ActType] = Case When Exists( Select Top 1 Ins.[FactorRowCode] From Inserted Ins Where Ins.[FactorRowCode] = d.[FactorRowCode]) Then ''ويرايش'' Else ''حذف'' End
+      , [ActUserId] = @user
+      , [ActClientRef] = @Client
+      , [ActSPID] = @@spid
+      , [ActRegistered] = Case When IsNull(f.[PrintCount],0) + IsNull(f.ShopNaghdReceive, 0) + IsNull(f.NaghdReceive ,0) + IsNull(f.PosReceive,0)>0 Then ''ثبت شده'' Else ''ثبت نشده'' End
+      , f.[FactorDate], f.[FactorPrivateCode], f.[CustomerRef], f.[isShopFactor], f.RstMizRef
+   From Deleted d
+   Join Factor f on d.[FactorRef] = f.[FactorCode]
+   Where '+@st+'
+     And ( Not Exists( Select Top 1 Ins.[FactorRowCode] From Inserted Ins Where Ins.[FactorRowCode] = d.[FactorRowCode])
+        or IsNull(f.[PrintCount],0) + IsNull(f.ShopNaghdReceive, 0) + IsNull(f.NaghdReceive ,0) + IsNull(f.PosReceive,0)>0 )
+End
+')
+Go
+Update dbsetup set datavalue = '0' Where KeyValue='FactorRowsLogActivate'
+go
+Update dbsetup set datavalue = '4' Where KeyValue='FactorRowsLogActivate'
+Go
+IF OBJECT_ID('[dbo].[spWeb_GetOrderPanel]') Is Not Null
+  Drop Procedure [dbo].[spWeb_GetOrderPanel]
+Go
+Create Procedure [dbo].[spWeb_GetOrderPanel]
+@StartDateTarget Nvarchar(20)='',
+@EndDateTarget Nvarchar(20)='',
+@Flag int
+-- 1  the least
+-- 2  the most
+-- 3  Not Sell
+-- 4  between
+-- 5  delete
+AS
+ SET NOCOUNT ON 
+
+ IF @Flag =1  --the least
+			Select Top 10 CAST(sum(FacAmount) AS INT) AS Amount, GoodRef, GoodName
+			From Factor f 
+			Join vwfactorrows r on f.FactorCode=r.FactorRef
+			Where FactorDate > @StartDateTarget And isShopFactor in(4,5,6)
+			  And Exists(Select 1 From Goodgroup p Join GoodsGrp gp on p.GoodGroupRef=gp.GroupCode 
+			     where GoodRef=GoodCode and p.GoodGroupRef not in (76,81,85,105))
+			Group by GoodRef,GoodName
+			Order by 1 
+
+IF @Flag =2 --the most
+			Select Top 10 CAST(sum (Facamount) AS INT) AS Amount,goodref,GoodName
+			From Factor f join
+			vwfactorrows r on f.FactorCode=r.FactorRef
+			where FactorDate >@StartDateTarget and isShopFactor in(4,5,6) And GoodRef not in (255793,252298,255795,257407,255750)
+			Group by GoodRef,GoodName
+			order by 1 desc
+
+If @Flag =3 --Not Sell
+	Begin
+			select GoodCode,GoodName From Good g  Where Not Exists (select 1 from Factor f join
+			vwfactorrows r on f.FactorCode=r.FactorRef
+			where FactorDate >@StartDateTarget and isShopFactor in(4,5,6) And Goodref=g.GoodCode)
+			and Exists (select 1 from GoodStack where ActiveStack = 1 and GoodRef=GoodCode and StackRef=2)
+			and Exists (select 1 from Goodgroup p join GoodsGrp gp on p.GoodGroupRef=gp.GroupCode where GoodRef=GoodCode and p.GoodGroupRef not in (76,81,85,105))
+	End 
+If @Flag =4 --Bettwen
+	Begin
+			select CAST(sum (Facamount) AS INT) AS Amount,goodref,GoodName,GoodExplain1,FactorDate
+			From Factor f join
+			vwfactorrows r on f.FactorCode=r.FactorRef
+			where FactorDate between @StartDateTarget and @EndDateTarget
+			and isShopFactor in(4,5,6)
+			And Exists (select 1 from Goodgroup p join GoodsGrp gp on p.GoodGroupRef=gp.GroupCode where GoodRef=GoodCode )
+			Group by GoodRef,GoodName,GoodExplain1,FactorDate
+			order by 1 desc
+	End 
+
+If @Flag =5 --delete
+	Begin
+
+	Select Amount = Cast(FacAmount AS INT)
+	  , fr.FactorDate
+	  , GoodExplain1 = SubString(Convert( Varchar(8), ActDate , 8) , 1, 5)+' - '+IsNull(m.RstMizName,'')
+	  , GoodName 
+	  , fr.FactorRef
+	From FactorRowsLog fr
+	Left Join good vg on vg.GoodCode=fr.GoodRef
+	Left Join RstMiz m on m.RstMizCode=fr.RstMizRef
+	Where fr.FactorDate Between @StartDateTarget and @EndDateTarget
+	   And fr.isShopFactor in(4,5,6) 
+	   And ActType=N'حذف'  
+	Order By fr.FactorDate desc
+
+
+	End 
+GO
